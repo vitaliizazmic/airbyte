@@ -1,24 +1,51 @@
 package io.airbyte.integrations.source.jdbc;
 
 import io.airbyte.integrations.source.jdbc.models.JdbcState;
+import io.airbyte.integrations.source.jdbc.models.JdbcStreamState;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
 
 public class AbstractJdbcState1 {
-  private final Map<String, CursorInfo> originalStreamNameToCursorInfo;
-  private final Map<String, CursorInfo> currentstreamNameToCursorInfo;
+  private final Map<String, CursorInfo> map;
 
   public AbstractJdbcState1(JdbcState serialized) {
-    serialized
+    final JdbcStreamState jdbcStreamState = new JdbcStreamState();
+    map = serialized.getStreams()
+        .stream()
+        .collect(Collectors.toMap(s -> s.getStreamName(),  s -> new CursorInfo(s.getCursorField(), s.getCursor())));
   }
 
-  public static class CursorInfo {
-    final List<String> cursorField;
-    final String value;
+  public Optional<CursorInfo> getCursorInfo(String streamName) {
+    return Optional.ofNullable(map.get(streamName));
+  }
 
-    public CursorInfo(List<String> cursorField, String value) {
+
+  public static class CursorInfo {
+    private final List<String> originalCusorField;
+    private final String originalCursor;
+
+    private List<String> cursorField;
+    private String cursor;
+
+    public CursorInfo(List<String> cursorField, String cursor) {
+      this.originalCusorField = cursorField;
+      this.originalCursor = cursor;
       this.cursorField = cursorField;
-      this.value = value;
+      this.cursor = cursor;
+    }
+
+    public List<String> getOriginalCursorField() {
+      return originalCusorField;
+    }
+
+    public String getOriginalCursorField2() {
+      return String.join(".", originalCusorField);
+    }
+
+    public String getOriginalCursor() {
+      return originalCursor;
     }
 
     public List<String> getCursorField() {
@@ -26,20 +53,19 @@ public class AbstractJdbcState1 {
     }
 
     public String getCursorField2() {
-      return Arrays.;
+      return String.join(".", cursorField);
     }
 
-    public String getValue() {
-      return value;
-    }
-  }
-
-  public static class CursorInfoMutable extends CursorInfo {
-
-    public CursorInfoMutable(List<String> cursorField, String value) {
-      super(cursorField, value);
+    public String getCursor() {
+      return cursor;
     }
 
+    public void setCursorField(List<String> cursorField) {
+      this.cursorField = cursorField;
+    }
 
+    public void setCursor(String cursor) {
+      this.cursor = cursor;
+    }
   }
 }

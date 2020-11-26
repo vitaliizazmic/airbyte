@@ -15,7 +15,7 @@ jsonSchema2Pojo {
     targetDirectory = new File(project.buildDir, 'generated/src/gen/java/')
     removeOldOutput = true
 
-    targetPackage = 'io.airbyte.integrations.source.jdbc.models;'
+    targetPackage = 'io.airbyte.integrations.source.jdbc.models'
 
     useLongIntegers = true
     generateBuilders = true
