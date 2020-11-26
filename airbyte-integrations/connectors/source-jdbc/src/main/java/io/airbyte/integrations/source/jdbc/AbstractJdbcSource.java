@@ -62,6 +62,7 @@ import org.jooq.SQLDialect;
 import org.jooq.Schema;
 import org.jooq.Table;
 import org.slf4j.Logger;
+import io.airbyte.integrations.source.jdbc.models.JdbcState;
 import org.slf4j.LoggerFactory;
 
 public abstract class AbstractJdbcSource implements Source {
@@ -148,6 +149,7 @@ public abstract class AbstractJdbcSource implements Source {
 
   @Override
   public Stream<AirbyteMessage> read(JsonNode config, ConfiguredAirbyteCatalog catalog, JsonNode state) throws Exception {
+    final AbstractJdbcState1 state1 = new AbstractJdbcState1(Jsons.object(state, JdbcState.class));
     final Instant now = Instant.now();
 
     final Database database = createDatabase(config);
@@ -175,6 +177,11 @@ public abstract class AbstractJdbcSource implements Source {
       }
 
       final String fieldNames = selectedDatabaseFields.stream().map(Field::getName).collect(Collectors.joining(", "));
+      final StringBuilder query = String.format("SELECT %s FROM %s", fieldNames, table.getName());
+      if(state1.)
+      query.append()
+
+
       final Stream<AirbyteMessage> stream = database.query(
           ctx -> ctx.fetchStream(String.format("SELECT %s FROM %s", fieldNames, table.getName()))
               .map(r -> new AirbyteMessage()
