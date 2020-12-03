@@ -30,9 +30,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.airbyte.commons.json.Jsons;
 import io.airbyte.commons.lang.Exceptions;
 import io.airbyte.commons.resources.MoreResources;
+import io.airbyte.commons.stream.MoreStreams;
 import io.airbyte.db.Database;
 import io.airbyte.db.Databases;
 import io.airbyte.integrations.base.Source;
+import io.airbyte.integrations.source.jdbc.models.JdbcState;
 import io.airbyte.protocol.models.AirbyteCatalog;
 import io.airbyte.protocol.models.AirbyteConnectionStatus;
 import io.airbyte.protocol.models.AirbyteConnectionStatus.Status;
@@ -45,11 +47,14 @@ import io.airbyte.protocol.models.ConfiguredAirbyteStream;
 import io.airbyte.protocol.models.ConnectorSpecification;
 import io.airbyte.protocol.models.Field;
 import io.airbyte.protocol.models.Field.JsonSchemaPrimitive;
+import io.airbyte.protocol.models.SyncMode;
 import java.io.IOException;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -58,11 +63,11 @@ import org.jooq.DSLContext;
 import org.jooq.DataType;
 import org.jooq.JSONFormat;
 import org.jooq.JSONFormat.RecordFormat;
+import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.Schema;
 import org.jooq.Table;
 import org.slf4j.Logger;
-import io.airbyte.integrations.source.jdbc.models.JdbcState;
 import org.slf4j.LoggerFactory;
 
 public abstract class AbstractJdbcSource implements Source {
@@ -139,17 +144,16 @@ public abstract class AbstractJdbcSource implements Source {
   private List<Table<?>> discoverInternal(final Database database) throws Exception {
     return database.query(context -> {
       final List<Schema> schemas = context.meta().getSchemas();
-      final List<Table<?>> tables = schemas.stream()
+      return schemas.stream()
           .filter(schema -> !getExcludedInternalSchemas().contains(schema.getName()))
           .flatMap(schema -> context.meta(schema).getTables().stream())
           .collect(Collectors.toList());
-      return tables;
     });
   }
 
   @Override
   public Stream<AirbyteMessage> read(JsonNode config, ConfiguredAirbyteCatalog catalog, JsonNode state) throws Exception {
-    final AbstractJdbcState1 state1 = new AbstractJdbcState1(Jsons.object(state, JdbcState.class));
+    final JdbcStateManager stateManager = new JdbcStateManager(Jsons.object(state, JdbcState.class));
     final Instant now = Instant.now();
 
     final Database database = createDatabase(config);
@@ -160,13 +164,14 @@ public abstract class AbstractJdbcSource implements Source {
     Stream<AirbyteMessage> resultStream = Stream.empty();
 
     for (final ConfiguredAirbyteStream airbyteStream : catalog.getStreams()) {
-      if (!tableNameToTable.containsKey(airbyteStream.getStream().getName())) {
+      final String streamName = airbyteStream.getStream().getName();
+      if (!tableNameToTable.containsKey(streamName)) {
         continue;
       }
 
       final Set<String> selectedFields = CatalogHelpers.getTopLevelFieldNames(airbyteStream);
 
-      final TableInfo table = tableNameToTable.get(airbyteStream.getStream().getName());
+      final TableInfo table = tableNameToTable.get(streamName);
       final List<Field> selectedDatabaseFields = table.getFields()
           .stream()
           .filter(field -> selectedFields.contains(field.getName()))
@@ -177,24 +182,59 @@ public abstract class AbstractJdbcSource implements Source {
       }
 
       final String fieldNames = selectedDatabaseFields.stream().map(Field::getName).collect(Collectors.joining(", "));
-      final StringBuilder query = String.format("SELECT %s FROM %s", fieldNames, table.getName());
-      if(state1.)
-      query.append()
 
+      final Stream<AirbyteMessage> stream;
+      // if incremental and has state
+      if (airbyteStream.getSyncMode() == SyncMode.INCREMENTAL) {
+        final String cursorField = IncrementalUtils.getCursorField(airbyteStream);
+        final JsonSchemaPrimitive cursorType = IncrementalUtils.getCursorType(airbyteStream, cursorField);
+        final Optional<String> initialCursorOptional = stateManager.getOriginalCursor(streamName);
 
-      final Stream<AirbyteMessage> stream = database.query(
-          ctx -> ctx.fetchStream(String.format("SELECT %s FROM %s", fieldNames, table.getName()))
-              .map(r -> new AirbyteMessage()
-                  .withType(Type.RECORD)
-                  .withRecord(new AirbyteRecordMessage()
-                      .withStream(airbyteStream.getStream().getName())
-                      .withEmittedAt(now.toEpochMilli())
-                      .withData(Jsons.deserialize(r.formatJSON(DB_JSON_FORMAT))))));
+        final Stream<AirbyteMessage> internalMessageStream;
+        // null comparators are going to be a problem.
+        if (initialCursorOptional.isPresent()) {
+          internalMessageStream =
+              getMessageStream(executeIncrementalQuery(database, fieldNames, table.getName(), cursorField, initialCursorOptional.get()), streamName,
+                  now.toEpochMilli());
+        } else {
+          internalMessageStream = getMessageStream(executeFullRefreshQuery(database, fieldNames, table.getName()), streamName, now.toEpochMilli());
+        }
+
+        final StateDecoratingIterator stateDecoratingIterator = new StateDecoratingIterator(
+            internalMessageStream,
+            stateManager,
+            streamName,
+            cursorField,
+            initialCursorOptional.orElse(null),
+            cursorType);
+
+        stream = MoreStreams.toStream(stateDecoratingIterator);
+      } else {
+        stream = getMessageStream(executeFullRefreshQuery(database, fieldNames, table.getName()), streamName, now.toEpochMilli());
+      }
 
       resultStream = Stream.concat(resultStream, stream);
     }
 
     return resultStream.onClose(() -> Exceptions.toRuntime(database::close));
+  }
+
+  private static Stream<Record> executeFullRefreshQuery(Database database, String fieldNames, String tableName) throws SQLException {
+    return database.query(ctx -> ctx.fetchStream(String.format("SELECT %s FROM %s", fieldNames, tableName)));
+  }
+
+  private static Stream<Record> executeIncrementalQuery(Database database, String fieldNames, String tableName, String cursorField, String cursor)
+      throws SQLException {
+    return database.query(ctx -> ctx.fetchStream(String.format("SELECT %s FROM %s WHERE %s > %s", fieldNames, tableName, cursorField, cursor)));
+  }
+
+  private static Stream<AirbyteMessage> getMessageStream(Stream<Record> recordStream, String streamName, long time) {
+    return recordStream.map(r -> new AirbyteMessage()
+        .withType(Type.RECORD)
+        .withRecord(new AirbyteRecordMessage()
+            .withStream(streamName)
+            .withEmittedAt(time)
+            .withData(Jsons.deserialize(r.formatJSON(DB_JSON_FORMAT)))));
   }
 
   private Database createDatabase(JsonNode config) {
