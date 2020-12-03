@@ -99,7 +99,7 @@ public class JdbcStateManager {
     return new AirbyteStateMessage().withData(Jsons.jsonNode(jdbcState));
   }
 
-  public static class CursorInfo {
+  private static class CursorInfo {
 
     private final String originalCursorField;
     private final String originalCursor;

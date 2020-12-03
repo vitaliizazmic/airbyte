@@ -184,14 +184,12 @@ public abstract class AbstractJdbcSource implements Source {
       final String fieldNames = selectedDatabaseFields.stream().map(Field::getName).collect(Collectors.joining(", "));
 
       final Stream<AirbyteMessage> stream;
-      // if incremental and has state
       if (airbyteStream.getSyncMode() == SyncMode.INCREMENTAL) {
         final String cursorField = IncrementalUtils.getCursorField(airbyteStream);
         final JsonSchemaPrimitive cursorType = IncrementalUtils.getCursorType(airbyteStream, cursorField);
         final Optional<String> initialCursorOptional = stateManager.getOriginalCursor(streamName);
 
         final Stream<AirbyteMessage> internalMessageStream;
-        // null comparators are going to be a problem.
         if (initialCursorOptional.isPresent()) {
           internalMessageStream =
               getMessageStream(executeIncrementalQuery(database, fieldNames, table.getName(), cursorField, initialCursorOptional.get()), streamName,
