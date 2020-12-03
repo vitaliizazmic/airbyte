@@ -153,7 +153,6 @@ public abstract class AbstractJdbcSource implements Source {
 
   @Override
   public Stream<AirbyteMessage> read(JsonNode config, ConfiguredAirbyteCatalog catalog, JsonNode state) throws Exception {
-    final JdbcStateManager stateManager = new JdbcStateManager(Jsons.object(state, JdbcState.class));
     final Instant now = Instant.now();
 
     final Database database = createDatabase(config);
@@ -185,6 +184,7 @@ public abstract class AbstractJdbcSource implements Source {
 
       final Stream<AirbyteMessage> stream;
       if (airbyteStream.getSyncMode() == SyncMode.INCREMENTAL) {
+        final JdbcStateManager stateManager = new JdbcStateManager(Jsons.object(state, JdbcState.class));
         final String cursorField = IncrementalUtils.getCursorField(airbyteStream);
         final JsonSchemaPrimitive cursorType = IncrementalUtils.getCursorType(airbyteStream, cursorField);
         final Optional<String> initialCursorOptional = stateManager.getOriginalCursor(streamName);
