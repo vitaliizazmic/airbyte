@@ -79,10 +79,11 @@ public class IncrementalUtils {
       case STRING -> {
         // byte based comparison--works well for uuid. other option is lexographical.
         return ByteBuffer.wrap(original.getBytes(Charsets.UTF_8)).compareTo(ByteBuffer.wrap(candidate.getBytes(Charsets.UTF_8)));
+//        return original.compareTo(candidate);
       }
       case NUMBER -> {
         // todo (cgardens) - handle big decimal.
-        return Double.compare(Double.parseDouble(original), Double.parseDouble(original));
+        return Double.compare(Double.parseDouble(original), Double.parseDouble(candidate));
       }
       case BOOLEAN -> {
         return Boolean.compare(Boolean.parseBoolean(original), Boolean.parseBoolean(candidate));

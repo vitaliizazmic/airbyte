@@ -27,6 +27,7 @@ package io.airbyte.integrations.source.jdbc;
 import static org.jooq.impl.DSL.currentSchema;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.google.common.collect.Lists;
 import io.airbyte.commons.json.Jsons;
 import io.airbyte.commons.lang.Exceptions;
 import io.airbyte.commons.resources.MoreResources;
@@ -50,8 +51,10 @@ import io.airbyte.protocol.models.Field.JsonSchemaPrimitive;
 import io.airbyte.protocol.models.SyncMode;
 import java.io.IOException;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -67,6 +70,7 @@ import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.Schema;
 import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -184,15 +188,24 @@ public abstract class AbstractJdbcSource implements Source {
 
       final Stream<AirbyteMessage> stream;
       if (airbyteStream.getSyncMode() == SyncMode.INCREMENTAL) {
-        final JdbcStateManager stateManager = new JdbcStateManager(Jsons.object(state, JdbcState.class));
+        final JdbcStateManager stateManager = new JdbcStateManager(state == null ? new JdbcState() : Jsons.object(state, JdbcState.class));
         final String cursorField = IncrementalUtils.getCursorField(airbyteStream);
         final JsonSchemaPrimitive cursorType = IncrementalUtils.getCursorType(airbyteStream, cursorField);
         final Optional<String> initialCursorOptional = stateManager.getOriginalCursor(streamName);
 
         final Stream<AirbyteMessage> internalMessageStream;
         if (initialCursorOptional.isPresent()) {
+          final Table<?> table1 = discoverInternal(database).get(0);
+          final List<org.jooq.Field<?>> fields = Arrays.asList(table1.fields());
+          final org.jooq.Field<?> cursorField1 = fields.stream().filter(f -> f.getName().equals(cursorField)).findFirst().get();
+
           internalMessageStream =
-              getMessageStream(executeIncrementalQuery(database, fieldNames, table.getName(), cursorField, initialCursorOptional.get()), streamName,
+              getMessageStream(executeIncrementalQuery(
+                  database,
+                  fields,
+                  table1,
+                  cursorField1,
+                  initialCursorOptional.get()), streamName,
                   now.toEpochMilli());
         } else {
           internalMessageStream = getMessageStream(executeFullRefreshQuery(database, fieldNames, table.getName()), streamName, now.toEpochMilli());
@@ -221,9 +234,25 @@ public abstract class AbstractJdbcSource implements Source {
     return database.query(ctx -> ctx.fetchStream(String.format("SELECT %s FROM %s", fieldNames, tableName)));
   }
 
-  private static Stream<Record> executeIncrementalQuery(Database database, String fieldNames, String tableName, String cursorField, String cursor)
+  private static Stream<Record> executeIncrementalQuery(Database database, List<org.jooq.Field<?>> fields, Table table, org.jooq.Field cursorField, String cursor)
+      throws SQLException {
+
+
+//    final org.jooq.Field<Timestamp> timestampField = DSL.toTimestamp(cursor, "YYYY-MM-DDTHH24:MI:SS");
+    return database.query(ctx -> ctx.select(fields)
+        .from(table)
+        .where(cursorField.greaterThan(toField(cursorField.getDataType(), cursor)))
+        .fetchStream());
+  }
+
+  private static Stream<Record> executeIncrementalQueryNotString(Database database, String fieldNames, String tableName, String cursorField, String cursor)
       throws SQLException {
     return database.query(ctx -> ctx.fetchStream(String.format("SELECT %s FROM %s WHERE %s > %s", fieldNames, tableName, cursorField, cursor)));
+  }
+
+  private static Stream<Record> executeIncrementalQueryString(Database database, String fieldNames, String tableName, String cursorField, String cursor)
+      throws SQLException {
+    return database.query(ctx -> ctx.fetchStream(String.format("SELECT %s FROM %s WHERE %s > '%s'", fieldNames, tableName, cursorField, cursor)));
   }
 
   private static Stream<AirbyteMessage> getMessageStream(Stream<Record> recordStream, String streamName, long time) {
@@ -303,6 +332,47 @@ public abstract class AbstractJdbcSource implements Source {
       return JsonSchemaPrimitive.STRING;
     } else {
       return JsonSchemaPrimitive.STRING;
+    }
+  }
+
+  private static org.jooq.Field toField(DataType<?> jooqDataType, String value) {
+    if (jooqDataType.isTimestamp()) {
+      return DSL.toTimestamp(value, "YYYY-MM-DDTHH24:MI:SS");
+    } else if(jooqDataType.isNumeric()) {
+      return DSL.field(value);
+    } else if (jooqDataType.isString()) {
+      return DSL.field("'" + value + "'");
+
+//    if (jooqDataType.isArray()) {
+//      return JsonSchemaPrimitive.ARRAY;
+//    } else if (jooqDataType.isBinary()) {
+//      return JsonSchemaPrimitive.STRING;
+//    } else if (jooqDataType.isDate()) {
+//      return JsonSchemaPrimitive.STRING;
+//    } else if (jooqDataType.isDateTime()) {
+//      return JsonSchemaPrimitive.STRING;
+//    } else if (jooqDataType.isEnum()) {
+//      return JsonSchemaPrimitive.STRING;
+//    } else if (jooqDataType.isInterval()) {
+//      // todo (cgardens) - not entirely sure if we prefer this or int.
+//      return JsonSchemaPrimitive.STRING;
+//    } else if (jooqDataType.isLob()) {
+//      return JsonSchemaPrimitive.STRING;
+//      // superset of isInteger
+//    } else if (jooqDataType.isNumeric()) {
+//      return JsonSchemaPrimitive.NUMBER;
+//    } else if (jooqDataType.isString()) {
+//      return JsonSchemaPrimitive.STRING;
+//    } else if (jooqDataType.isTemporal()) {
+//      return JsonSchemaPrimitive.STRING;
+//    } else if (jooqDataType.isTime()) {
+//      return JsonSchemaPrimitive.STRING;
+//    } else if (jooqDataType.isTimestamp()) {
+//      return JsonSchemaPrimitive.STRING;
+//    } else if (jooqDataType.isUDT()) {
+//      return JsonSchemaPrimitive.STRING;
+    } else {
+      return null;
     }
   }
 
