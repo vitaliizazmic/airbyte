@@ -213,7 +213,7 @@ class JdbcSourceTest {
   void testReadFailure() {
     final ConfiguredAirbyteStream spiedAbStream = spy(CONFIGURED_CATALOG.getStreams().get(0));
     final ConfiguredAirbyteCatalog catalog = new ConfiguredAirbyteCatalog().withStreams(Lists.newArrayList(spiedAbStream));
-    doCallRealMethod().doCallRealMethod().doThrow(new RuntimeException()).when(spiedAbStream).getStream();
+    doCallRealMethod().doThrow(new RuntimeException()).when(spiedAbStream).getStream();
 
     final JdbcSource source = new JdbcSource();
 
