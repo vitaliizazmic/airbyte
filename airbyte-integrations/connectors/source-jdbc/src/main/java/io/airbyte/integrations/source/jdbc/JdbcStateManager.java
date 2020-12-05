@@ -24,6 +24,7 @@
 
 package io.airbyte.integrations.source.jdbc;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import io.airbyte.commons.json.Jsons;
 import io.airbyte.integrations.source.jdbc.models.JdbcState;
@@ -33,6 +34,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+/**
+ * Handles the state machine for the state of jdbc source implementations.
+ */
 public class JdbcStateManager {
 
   private final Map<String, CursorInfo> map;
@@ -41,11 +45,8 @@ public class JdbcStateManager {
     map = serialized.getStreams()
         .stream()
         .peek(s -> {
-          if (s.getCursorField().size() == 0) {
-            throw new IllegalStateException("No cursor field specified for stream attempting to do incremental.");
-          } else if (s.getCursorField().size() > 1) {
-            throw new IllegalStateException("JdbcSource does not support composite cursor fields.");
-          }
+          Preconditions.checkState(s.getCursorField().size() != 0, "No cursor field specified for stream attempting to do incremental.");
+          Preconditions.checkState(s.getCursorField().size() == 1, "JdbcSource does not support composite cursor fields.");
         })
         .collect(Collectors.toMap(JdbcStreamState::getStreamName, s -> new CursorInfo(s.getCursorField().get(0), s.getCursor())));
   }

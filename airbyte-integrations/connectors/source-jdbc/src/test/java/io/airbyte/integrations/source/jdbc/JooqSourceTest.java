@@ -241,30 +241,11 @@ class JooqSourceTest {
 
   @Test
   void testIncrementalNoPreviousState() throws Exception {
-    final ConfiguredAirbyteCatalog configuredCatalog = getConfiguredCatalog();
-    configuredCatalog.getStreams().forEach(airbyteStream -> {
-      airbyteStream.setSyncMode(SyncMode.INCREMENTAL);
-      airbyteStream.setCursorField(Lists.newArrayList("id"));
-    });
-    final List<AirbyteMessage> actualMessages = jooqSource.read(config, configuredCatalog, null).collect(Collectors.toList());
-
-    actualMessages.forEach(r -> {
-      if (r.getRecord() != null) {
-        r.getRecord().setEmittedAt(null);
-      }
-    });
-
-    final List<AirbyteMessage> expectedMessages = new ArrayList<>(MESSAGES);
-    expectedMessages.add(new AirbyteMessage()
-        .withType(Type.STATE)
-        .withState(new AirbyteStateMessage()
-            .withData(Jsons.jsonNode(new JdbcState()
-                .withStreams(Lists.newArrayList(new JdbcStreamState()
-                    .withStreamName(STREAM_NAME)
-                    .withCursorField(ImmutableList.of("id"))
-                    .withCursor("3")))))));
-
-    assertEquals(expectedMessages, actualMessages);
+    incrementalCursorCheck(
+        "id",
+        null,
+        "3",
+        Lists.newArrayList(MESSAGES));
   }
 
   @Test
