@@ -232,16 +232,16 @@ public abstract class AbstractJooqSource implements Source {
         .fetchStream());
   }
 
-  private static Stream<Record> executeIncrementalQuery(Database database,
-                                                        List<org.jooq.Field<?>> fields,
-                                                        Table<?> table,
-                                                        org.jooq.Field<?> cursorField,
-                                                        String cursor)
+  private static <T> Stream<Record> executeIncrementalQuery(Database database,
+                                                            List<org.jooq.Field<?>> fields,
+                                                            Table<?> table,
+                                                            org.jooq.Field<T> cursorField,
+                                                            String cursor)
       throws SQLException {
 
     return database.query(ctx -> ctx.select(fields)
         .from(table)
-        .where(cursorField.greaterThan(toField(cursorField.getDataType(), cursor)))
+        .where(cursorField.greaterThan(AbstractJooqSource.toField(cursorField.getDataType(), cursor)))
         .fetchStream());
   }
 
@@ -325,15 +325,17 @@ public abstract class AbstractJooqSource implements Source {
     }
   }
 
-  private static org.jooq.Field toField(DataType<?> jooqDataType, String value) {
+  private static <T> org.jooq.Field<T> toField(DataType<T> jooqDataType, String value) {
     if (jooqDataType.isNumeric()) {
-      return DSL.field(value);
+      return DSL.field(value, jooqDataType);
     } else if (jooqDataType.isString() || jooqDataType.isTemporal()) {
-      // todo (cgardens) - this is bad because only works for mysql, psql, and sqlite. but these are also
-      // the ones in free jooq, so it should be okay, still bad.
-      return DSL.field("'" + value + "'");
+      // todo (cgardens) - this is bad because only works for mysql, psql, and sqlite. these are also the
+      // only dialects that jooq supports in the free version, so this should not actually be an issue. it
+      // is still sketchy.
+      return DSL.field("'" + value + "'", jooqDataType);
     } else {
       throw new IllegalStateException(String.format("Cannot use column of type %s", jooqDataType.toString()));
     }
   }
+
 }
