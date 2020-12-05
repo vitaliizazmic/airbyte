@@ -30,9 +30,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.airbyte.commons.json.Jsons;
 import io.airbyte.commons.lang.Exceptions;
 import io.airbyte.commons.resources.MoreResources;
+import io.airbyte.commons.stream.MoreStreams;
 import io.airbyte.db.Database;
 import io.airbyte.db.Databases;
 import io.airbyte.integrations.base.Source;
+import io.airbyte.integrations.source.jdbc.models.JdbcState;
 import io.airbyte.protocol.models.AirbyteCatalog;
 import io.airbyte.protocol.models.AirbyteConnectionStatus;
 import io.airbyte.protocol.models.AirbyteConnectionStatus.Status;
@@ -45,11 +47,14 @@ import io.airbyte.protocol.models.ConfiguredAirbyteStream;
 import io.airbyte.protocol.models.ConnectorSpecification;
 import io.airbyte.protocol.models.Field;
 import io.airbyte.protocol.models.Field.JsonSchemaPrimitive;
+import io.airbyte.protocol.models.SyncMode;
 import java.io.IOException;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -58,22 +63,24 @@ import org.jooq.DSLContext;
 import org.jooq.DataType;
 import org.jooq.JSONFormat;
 import org.jooq.JSONFormat.RecordFormat;
+import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.Schema;
 import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public abstract class AbstractJdbcSource implements Source {
+public abstract class AbstractJooqSource implements Source {
 
-  private static final Logger LOGGER = LoggerFactory.getLogger(AbstractJdbcSource.class);
+  private static final Logger LOGGER = LoggerFactory.getLogger(AbstractJooqSource.class);
 
   private static final JSONFormat DB_JSON_FORMAT = new JSONFormat().recordFormat(RecordFormat.OBJECT);
 
   private final String driverClass;
   private final SQLDialect dialect;
 
-  public AbstractJdbcSource(final String driverClass, final SQLDialect dialect) {
+  public AbstractJooqSource(final String driverClass, final SQLDialect dialect) {
     this.driverClass = driverClass;
     this.dialect = dialect;
   }
@@ -138,11 +145,10 @@ public abstract class AbstractJdbcSource implements Source {
   private List<Table<?>> discoverInternal(final Database database) throws Exception {
     return database.query(context -> {
       final List<Schema> schemas = context.meta().getSchemas();
-      final List<Table<?>> tables = schemas.stream()
+      return schemas.stream()
           .filter(schema -> !getExcludedInternalSchemas().contains(schema.getName()))
           .flatMap(schema -> context.meta(schema).getTables().stream())
           .collect(Collectors.toList());
-      return tables;
     });
   }
 
@@ -152,21 +158,21 @@ public abstract class AbstractJdbcSource implements Source {
 
     final Database database = createDatabase(config);
 
-    final Map<String, TableInfo> tableNameToTable = getTables(database).stream()
-        .collect(Collectors.toMap(TableInfo::getName, Function.identity()));
+    final Map<String, Table<?>> tableNameToTable = discoverInternal(database).stream()
+        .collect(Collectors.toMap(t -> String.format("%s.%s", t.getSchema().getName(), t.getName()), Function.identity()));
 
     Stream<AirbyteMessage> resultStream = Stream.empty();
 
     for (final ConfiguredAirbyteStream airbyteStream : catalog.getStreams()) {
-      if (!tableNameToTable.containsKey(airbyteStream.getStream().getName())) {
+      final String streamName = airbyteStream.getStream().getName();
+      if (!tableNameToTable.containsKey(streamName)) {
         continue;
       }
 
       final Set<String> selectedFields = CatalogHelpers.getTopLevelFieldNames(airbyteStream);
 
-      final TableInfo table = tableNameToTable.get(airbyteStream.getStream().getName());
-      final List<Field> selectedDatabaseFields = table.getFields()
-          .stream()
+      final Table<?> table = tableNameToTable.get(streamName);
+      final List<org.jooq.Field<?>> selectedDatabaseFields = Arrays.stream(table.fields())
           .filter(field -> selectedFields.contains(field.getName()))
           .collect(Collectors.toList());
 
@@ -174,20 +180,78 @@ public abstract class AbstractJdbcSource implements Source {
         continue;
       }
 
-      final String fieldNames = selectedDatabaseFields.stream().map(Field::getName).collect(Collectors.joining(", "));
-      final Stream<AirbyteMessage> stream = database.query(
-          ctx -> ctx.fetchStream(String.format("SELECT %s FROM %s", fieldNames, table.getName()))
-              .map(r -> new AirbyteMessage()
-                  .withType(Type.RECORD)
-                  .withRecord(new AirbyteRecordMessage()
-                      .withStream(airbyteStream.getStream().getName())
-                      .withEmittedAt(now.toEpochMilli())
-                      .withData(Jsons.deserialize(r.formatJSON(DB_JSON_FORMAT))))));
+      final Stream<AirbyteMessage> stream;
+      if (airbyteStream.getSyncMode() == SyncMode.INCREMENTAL) {
+        final JdbcStateManager stateManager = new JdbcStateManager(state == null ? new JdbcState() : Jsons.object(state, JdbcState.class));
+        final String cursorField = IncrementalUtils.getCursorField(airbyteStream);
+        final JsonSchemaPrimitive cursorType = IncrementalUtils.getCursorType(airbyteStream, cursorField);
+        final Optional<String> initialCursorOptional = stateManager.getOriginalCursor(streamName);
+
+        final Stream<AirbyteMessage> internalMessageStream;
+        if (initialCursorOptional.isPresent()) {
+          final org.jooq.Field<?> cursorJooqField = Arrays
+              .stream(table.fields())
+              .filter(f -> f.getName().equals(cursorField))
+              .findFirst()
+              .orElseThrow(
+                  () -> new IllegalStateException(String.format("Could not find cursor field %s in table %s", cursorField, table.getName())));
+
+          final Stream<Record> queryStream = executeIncrementalQuery(
+              database,
+              selectedDatabaseFields,
+              table,
+              cursorJooqField,
+              initialCursorOptional.get());
+          internalMessageStream = getMessageStream(queryStream, streamName, now.toEpochMilli());
+        } else {
+          internalMessageStream = getMessageStream(executeFullRefreshQuery(database, selectedDatabaseFields, table), streamName, now.toEpochMilli());
+        }
+
+        final StateDecoratingIterator stateDecoratingIterator = new StateDecoratingIterator(
+            internalMessageStream,
+            stateManager,
+            streamName,
+            cursorField,
+            initialCursorOptional.orElse(null),
+            cursorType);
+
+        stream = MoreStreams.toStream(stateDecoratingIterator);
+      } else {
+        stream = getMessageStream(executeFullRefreshQuery(database, selectedDatabaseFields, table), streamName, now.toEpochMilli());
+      }
 
       resultStream = Stream.concat(resultStream, stream);
     }
 
     return resultStream.onClose(() -> Exceptions.toRuntime(database::close));
+  }
+
+  private static Stream<Record> executeFullRefreshQuery(Database database, List<org.jooq.Field<?>> jooqFields, Table<?> table) throws SQLException {
+    return database.query(ctx -> ctx.select(jooqFields)
+        .from(table)
+        .fetchStream());
+  }
+
+  private static Stream<Record> executeIncrementalQuery(Database database,
+                                                        List<org.jooq.Field<?>> fields,
+                                                        Table<?> table,
+                                                        org.jooq.Field<?> cursorField,
+                                                        String cursor)
+      throws SQLException {
+
+    return database.query(ctx -> ctx.select(fields)
+        .from(table)
+        .where(cursorField.greaterThan(toField(cursorField.getDataType(), cursor)))
+        .fetchStream());
+  }
+
+  private static Stream<AirbyteMessage> getMessageStream(Stream<Record> recordStream, String streamName, long time) {
+    return recordStream.map(r -> new AirbyteMessage()
+        .withType(Type.RECORD)
+        .withRecord(new AirbyteRecordMessage()
+            .withStream(streamName)
+            .withEmittedAt(time)
+            .withData(Jsons.deserialize(r.formatJSON(DB_JSON_FORMAT)))));
   }
 
   private Database createDatabase(JsonNode config) {
@@ -261,4 +325,15 @@ public abstract class AbstractJdbcSource implements Source {
     }
   }
 
+  private static org.jooq.Field toField(DataType<?> jooqDataType, String value) {
+    if (jooqDataType.isNumeric()) {
+      return DSL.field(value);
+    } else if (jooqDataType.isString() || jooqDataType.isTemporal()) {
+      // todo (cgardens) - this is bad because only works for mysql, psql, and sqlite. but these are also
+      // the ones in free jooq, so it should be okay, still bad.
+      return DSL.field("'" + value + "'");
+    } else {
+      throw new IllegalStateException(String.format("Cannot use column of type %s", jooqDataType.toString()));
+    }
+  }
 }

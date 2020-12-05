@@ -31,7 +31,6 @@ import static org.mockito.Mockito.spy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
@@ -39,26 +38,19 @@ import io.airbyte.commons.json.Jsons;
 import io.airbyte.commons.resources.MoreResources;
 import io.airbyte.db.Database;
 import io.airbyte.db.Databases;
-import io.airbyte.integrations.source.jdbc.models.JdbcState;
-import io.airbyte.integrations.source.jdbc.models.JdbcStreamState;
 import io.airbyte.protocol.models.AirbyteCatalog;
 import io.airbyte.protocol.models.AirbyteConnectionStatus;
 import io.airbyte.protocol.models.AirbyteConnectionStatus.Status;
 import io.airbyte.protocol.models.AirbyteMessage;
 import io.airbyte.protocol.models.AirbyteMessage.Type;
 import io.airbyte.protocol.models.AirbyteRecordMessage;
-import io.airbyte.protocol.models.AirbyteStateMessage;
 import io.airbyte.protocol.models.CatalogHelpers;
 import io.airbyte.protocol.models.ConfiguredAirbyteCatalog;
 import io.airbyte.protocol.models.ConfiguredAirbyteStream;
 import io.airbyte.protocol.models.ConnectorSpecification;
 import io.airbyte.protocol.models.Field;
 import io.airbyte.protocol.models.Field.JsonSchemaPrimitive;
-import io.airbyte.protocol.models.SyncMode;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
@@ -72,16 +64,15 @@ class JdbcSourceTest {
   private static final AirbyteCatalog CATALOG = CatalogHelpers.createAirbyteCatalog(
       STREAM_NAME,
       Field.of("id", JsonSchemaPrimitive.NUMBER),
-      Field.of("name", JsonSchemaPrimitive.STRING),
-      Field.of("updated_at", JsonSchemaPrimitive.STRING));
+      Field.of("name", JsonSchemaPrimitive.STRING));
   private static final ConfiguredAirbyteCatalog CONFIGURED_CATALOG = CatalogHelpers.toDefaultConfiguredCatalog(CATALOG);
-  private static final List<AirbyteMessage> MESSAGES = Lists.newArrayList(
+  private static final Set<AirbyteMessage> MESSAGES = Sets.newHashSet(
       new AirbyteMessage().withType(Type.RECORD)
-          .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME).withData(Jsons.jsonNode(ImmutableMap.of("id", 1, "name", "picard", "updated_at", "2004-10-19T10:23:54-07:00")))),
+          .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME).withData(Jsons.jsonNode(ImmutableMap.of("id", 1, "name", "picard")))),
       new AirbyteMessage().withType(Type.RECORD)
-          .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME).withData(Jsons.jsonNode(ImmutableMap.of("id", 2, "name", "crusher", "updated_at", "2005-10-19T10:23:54-07:00")))),
+          .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME).withData(Jsons.jsonNode(ImmutableMap.of("id", 2, "name", "crusher")))),
       new AirbyteMessage().withType(Type.RECORD)
-          .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME).withData(Jsons.jsonNode(ImmutableMap.of("id", 3, "name", "vash", "updated_at", "2006-10-19T10:23:54-07:00")))));
+          .withRecord(new AirbyteRecordMessage().withStream(STREAM_NAME).withData(Jsons.jsonNode(ImmutableMap.of("id", 3, "name", "vash")))));
 
   private JsonNode config;
 
@@ -108,8 +99,8 @@ class JdbcSourceTest {
         config.get("jdbc_url").asText());
 
     database.query(ctx -> {
-      ctx.fetch("CREATE TABLE id_and_name(id INTEGER, name VARCHAR(200), updated_at TIMESTAMP WITH TIME ZONE);");
-      ctx.fetch("INSERT INTO id_and_name (id, name, updated_at) VALUES (1,'picard', '2004-10-19T10:23:54-07:00'),  (2, 'crusher', '2005-10-19T10:23:54-07:00'), (3, 'vash', '2006-10-19T10:23:54-07:00');");
+      ctx.fetch("CREATE TABLE id_and_name(id INTEGER, name VARCHAR(200));");
+      ctx.fetch("INSERT INTO id_and_name (id, name) VALUES (1,'picard'),  (2, 'crusher'), (3, 'vash');");
       return null;
     });
   }
@@ -222,151 +213,11 @@ class JdbcSourceTest {
   void testReadFailure() {
     final ConfiguredAirbyteStream spiedAbStream = spy(CONFIGURED_CATALOG.getStreams().get(0));
     final ConfiguredAirbyteCatalog catalog = new ConfiguredAirbyteCatalog().withStreams(Lists.newArrayList(spiedAbStream));
-    doCallRealMethod().doThrow(new RuntimeException()).when(spiedAbStream).getStream();
+    doCallRealMethod().doCallRealMethod().doThrow(new RuntimeException()).when(spiedAbStream).getStream();
 
     final JdbcSource source = new JdbcSource();
 
     assertThrows(RuntimeException.class, () -> source.read(config, catalog, null));
   }
 
-  @Test
-  void testIncremental() throws Exception {
-    CONFIGURED_CATALOG.getStreams().forEach(airbyteStream -> {
-      airbyteStream.setSyncMode(SyncMode.INCREMENTAL);
-      airbyteStream.setCursorField(Lists.newArrayList("id"));
-    });
-    final Set<AirbyteMessage> actualMessages = new JdbcSource().read(config, CONFIGURED_CATALOG, null).collect(Collectors.toSet());
-
-    actualMessages.forEach(r -> {
-      if (r.getRecord() != null) {
-        r.getRecord().setEmittedAt(null);
-      }
-    });
-
-    final Set<AirbyteMessage> expectedMessages = new HashSet<>(MESSAGES);
-    expectedMessages.add(new AirbyteMessage()
-        .withType(Type.STATE)
-    .withState(new AirbyteStateMessage()
-    .withData(Jsons.jsonNode(new JdbcState()
-      .withStreams(Lists.newArrayList(new JdbcStreamState()
-          .withStreamName("public.id_and_name")
-          .withCursorField(ImmutableList.of("id"))
-          .withCursor("3")
-      ))))));
-
-    assertEquals(expectedMessages, actualMessages);
-  }
-
-  @Test
-  void testIncrementalIntCheckCursor() throws Exception {
-    CONFIGURED_CATALOG.getStreams().forEach(airbyteStream -> {
-      airbyteStream.setSyncMode(SyncMode.INCREMENTAL);
-      airbyteStream.setCursorField(Lists.newArrayList("id"));
-    });
-
-    final JdbcState state = new JdbcState()
-            .withStreams(Lists.newArrayList(new JdbcStreamState()
-                .withStreamName("public.id_and_name")
-                .withCursorField(ImmutableList.of("id"))
-                .withCursor("2")
-            ));
-
-    final Set<AirbyteMessage> actualMessages = new JdbcSource().read(config, CONFIGURED_CATALOG, Jsons.jsonNode(state)).collect(Collectors.toSet());
-
-    actualMessages.forEach(r -> {
-      if (r.getRecord() != null) {
-        r.getRecord().setEmittedAt(null);
-      }
-    });
-
-    final Set<AirbyteMessage> expectedMessages = new HashSet<>();
-    expectedMessages.add(MESSAGES.get(2));
-    expectedMessages.add(new AirbyteMessage()
-        .withType(Type.STATE)
-        .withState(new AirbyteStateMessage()
-            .withData(Jsons.jsonNode(new JdbcState()
-                .withStreams(Lists.newArrayList(new JdbcStreamState()
-                    .withStreamName("public.id_and_name")
-                    .withCursorField(ImmutableList.of("id"))
-                    .withCursor("3")
-                ))))));
-
-    assertEquals(expectedMessages, actualMessages);
-  }
-
-  @Test
-  void testIncrementalStringCheckCursor() throws Exception {
-    CONFIGURED_CATALOG.getStreams().forEach(airbyteStream -> {
-      airbyteStream.setSyncMode(SyncMode.INCREMENTAL);
-      airbyteStream.setCursorField(Lists.newArrayList("name"));
-    });
-
-    final JdbcState state = new JdbcState()
-        .withStreams(Lists.newArrayList(new JdbcStreamState()
-            .withStreamName("public.id_and_name")
-            .withCursorField(ImmutableList.of("name"))
-            .withCursor("patent")
-        ));
-
-    final Set<AirbyteMessage> actualMessages = new JdbcSource().read(config, CONFIGURED_CATALOG, Jsons.jsonNode(state)).collect(Collectors.toSet());
-
-    actualMessages.forEach(r -> {
-      if (r.getRecord() != null) {
-        r.getRecord().setEmittedAt(null);
-      }
-    });
-
-    final Set<AirbyteMessage> expectedMessages = new HashSet<>();
-    expectedMessages.add(MESSAGES.get(0));
-    expectedMessages.add(MESSAGES.get(2));
-    expectedMessages.add(new AirbyteMessage()
-        .withType(Type.STATE)
-        .withState(new AirbyteStateMessage()
-            .withData(Jsons.jsonNode(new JdbcState()
-                .withStreams(Lists.newArrayList(new JdbcStreamState()
-                    .withStreamName("public.id_and_name")
-                    .withCursorField(ImmutableList.of("name"))
-                    .withCursor("vash")
-                ))))));
-
-    assertEquals(expectedMessages, actualMessages);
-  }
-
-  @Test
-  void testIncrementalTimestampzCheckCursor() throws Exception {
-    CONFIGURED_CATALOG.getStreams().forEach(airbyteStream -> {
-      airbyteStream.setSyncMode(SyncMode.INCREMENTAL);
-      airbyteStream.setCursorField(Lists.newArrayList("updated_at"));
-    });
-
-    final JdbcState state = new JdbcState()
-        .withStreams(Lists.newArrayList(new JdbcStreamState()
-            .withStreamName("public.id_and_name")
-            .withCursorField(ImmutableList.of("updated_at"))
-            .withCursor("2005-10-19T9:23:54-07:00")
-        ));
-
-    final Set<AirbyteMessage> actualMessages = new JdbcSource().read(config, CONFIGURED_CATALOG, Jsons.jsonNode(state)).collect(Collectors.toSet());
-
-    actualMessages.forEach(r -> {
-      if (r.getRecord() != null) {
-        r.getRecord().setEmittedAt(null);
-      }
-    });
-
-    final Set<AirbyteMessage> expectedMessages = new HashSet<>();
-    expectedMessages.add(MESSAGES.get(1));
-    expectedMessages.add(MESSAGES.get(2));
-    expectedMessages.add(new AirbyteMessage()
-        .withType(Type.STATE)
-        .withState(new AirbyteStateMessage()
-            .withData(Jsons.jsonNode(new JdbcState()
-                .withStreams(Lists.newArrayList(new JdbcStreamState()
-                    .withStreamName("public.id_and_name")
-                    .withCursorField(ImmutableList.of("updated_at"))
-                    .withCursor("2006-10-19T10:23:54-07:00")
-                ))))));
-
-    assertEquals(expectedMessages, actualMessages);
-  }
 }
