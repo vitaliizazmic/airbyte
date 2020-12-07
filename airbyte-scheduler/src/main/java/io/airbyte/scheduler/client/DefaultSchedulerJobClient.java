@@ -30,6 +30,7 @@ import io.airbyte.config.StandardSync;
 import io.airbyte.scheduler.Job;
 import io.airbyte.scheduler.JobStatus;
 import io.airbyte.scheduler.persistence.DefaultJobCreator;
+import io.airbyte.scheduler.persistence.JobCreator;
 import io.airbyte.scheduler.persistence.JobPersistence;
 import java.io.IOException;
 import org.slf4j.Logger;
@@ -40,7 +41,7 @@ public class DefaultSchedulerJobClient implements SchedulerJobClient {
   private static final Logger LOGGER = LoggerFactory.getLogger(DefaultSchedulerJobClient.class);
 
   private final JobPersistence jobPersistence;
-  private final DefaultJobCreator jobCreator;
+  private final JobCreator jobCreator;
 
   public DefaultSchedulerJobClient(JobPersistence jobPersistence) {
     this.jobPersistence = jobPersistence;
