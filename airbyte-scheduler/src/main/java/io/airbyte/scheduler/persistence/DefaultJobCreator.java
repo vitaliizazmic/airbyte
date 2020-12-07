@@ -40,9 +40,11 @@ import io.airbyte.config.StandardSync;
 import io.airbyte.config.StandardSyncOutput;
 import io.airbyte.config.State;
 import io.airbyte.protocol.models.ConfiguredAirbyteCatalog;
+import io.airbyte.protocol.models.SyncMode;
 import io.airbyte.scheduler.Attempt;
 import io.airbyte.scheduler.AttemptStatus;
 import io.airbyte.scheduler.Job;
+import io.airbyte.scheduler.SchedulerConstants;
 import io.airbyte.scheduler.ScopeHelper;
 import java.io.IOException;
 import java.util.Comparator;
@@ -138,6 +140,28 @@ public class DefaultJobCreator implements JobCreator {
         AirbyteProtocolConverters.toConfiguredCatalog(standardSync.getSchema()),
         sourceDockerImageName,
         destinationDockerImageName);
+  }
+
+  // Strategy:
+  // 1. Set all streams to full refresh.
+  // 2. Create a job where the source emits no records.
+  // 3. Run a sync from the empty source to the destination. This will overwrite all data for each
+  // stream in the destination.
+  // 4. The Empty source emits no state message, so state will start at null (i.e. start from the
+  // beginning on the next sync).
+  @Override
+  public long createResetConnectionJob(DestinationConnection destination, StandardSync standardSync, String destinationDockerImage)
+      throws IOException {
+    final ConfiguredAirbyteCatalog configuredAirbyteCatalog = AirbyteProtocolConverters.toConfiguredCatalog(standardSync.getSchema());
+    configuredAirbyteCatalog.getStreams().forEach(configuredAirbyteStream -> configuredAirbyteStream.setSyncMode(SyncMode.FULL_REFRESH));
+
+    return createSyncJobInternal(
+        standardSync.getConnectionId(),
+        Jsons.emptyObject(),
+        destination.getConfiguration(),
+        configuredAirbyteCatalog,
+        SchedulerConstants.RESET_SOURCE_IMAGE_PLACEHOLDER,
+        destinationDockerImage);
   }
 
   private long createSyncJobInternal(

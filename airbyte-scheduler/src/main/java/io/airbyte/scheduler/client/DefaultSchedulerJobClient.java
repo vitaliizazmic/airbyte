@@ -89,6 +89,13 @@ public class DefaultSchedulerJobClient implements SchedulerJobClient {
     return waitUntilJobIsTerminalOrTimeout(jobId);
   }
 
+  @Override
+  public Job createResetConnectionJob(DestinationConnection destination, StandardSync standardSync, String destinationDockerImage)
+      throws IOException {
+    final long jobId = jobCreator.createResetConnectionJob(destination, standardSync, destinationDockerImage);
+    return waitUntilJobIsTerminalOrTimeout(jobId);
+  }
+
   private Job waitUntilJobIsTerminalOrTimeout(final long jobId) throws IOException {
     LOGGER.info("Waiting for job id: " + jobId);
     for (int i = 0; i < 120; i++) {
