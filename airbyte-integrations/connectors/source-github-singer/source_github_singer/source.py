@@ -33,14 +33,23 @@ from base_singer import SingerSource, SyncModeInfo
 class SourceGithubSinger(SingerSource):
     def check_config(self, logger, config_path: str, config: json) -> AirbyteConnectionStatus:
         try:
-            r = requests.get("https://api.github.com/repos/airbytehq/airbyte/commits", auth=(config["access_token"], ""))
-            if r.status_code == 200:
-                return AirbyteConnectionStatus(status=Status.SUCCEEDED)
-            else:
-                return AirbyteConnectionStatus(status=Status.FAILED, message=r.text)
-        except Exception as e:
-            logger.error(e)
-            return AirbyteConnectionStatus(status=Status.FAILED, message=f"{str(e)}")
+            repositories = config["repository"].split(' ')
+            for repository in repositories:
+                org = repository.split('/')[0]
+                check_urls = [
+                    "https://api.github.com/repos/airbytehq/airbyte/commits",
+                    f"https://api.github.com/repos/{repository}/collaborators",
+                    f"https://api.github.com/orgs/{org}/teams?sort=created_at&direction=desc"
+                ]
+                for url in check_urls:
+                    response = requests.get(url, auth=(config["access_token"], ""))
+                    if response.status_code != requests.codes.ok:
+                        return AirbyteConnectionStatus(status=Status.FAILED, message=f'{repository} {response.text}')
+            return AirbyteConnectionStatus(status=Status.SUCCEEDED)
+        except Exception as err:
+            logger.error(err)
+            error_msg = f"Unable to connect with the provided credentials. Error: {err}"
+            return AirbyteConnectionStatus(status=Status.FAILED, message=error_msg)
 
     def discover_cmd(self, logger, config_path) -> str:
         return f"tap-github --config {config_path} --discover"
